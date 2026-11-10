@@ -1,7 +1,10 @@
-//! Codex: the reference driver. `codex exec --json` takes the whole turn as arguments and already speaks in shapes, so a line passes through.
+//! Codex: exec on Unix; the app-server pipe protocol on Windows, where large argv fails with OS error 206.
 use super::{Driver, Made, Reaction, TurnIn};
 use serde_json::Value;
 use crate::agents::codex as c;
+#[cfg(any(windows, test))]
+#[path = "codex_appserver.rs"]
+mod appserver;
 
 pub struct CodexDriver;
 impl Driver for CodexDriver {
@@ -10,7 +13,14 @@ impl Driver for CodexDriver {
     }
     fn on_line(&mut self, line: &Value) -> Reaction { if line.is_object() { Reaction { send: vec![], shapes: vec![line.clone()] } } else { Reaction::default() } }
 }
-pub fn driver(provider: &str) -> Option<Made> { if provider == "codex" { Some(Made { cli: "codex", driver: Box::new(CodexDriver) }) } else { None } }
+pub fn driver(provider: &str) -> Option<Made> {
+    if provider != "codex" { return None }
+    #[cfg(windows)]
+    let driver: Box<dyn Driver> = Box::new(appserver::AppServer::default());
+    #[cfg(not(windows))]
+    let driver: Box<dyn Driver> = Box::new(CodexDriver);
+    Some(Made { cli: "codex", driver })
+}
 
 #[cfg(test)]
 mod tests {

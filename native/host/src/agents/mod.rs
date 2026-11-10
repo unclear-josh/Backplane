@@ -884,7 +884,13 @@ impl Actor {
         if clear { self.live_close().await }
         self.commit(events).await;
         if let Some(a) = act { crate::settings::driver::spawn_act(self.ag.clone(), self.th.clone(), a) }
-        if ended && self.driver.as_ref().map_or(false, |d| d.ends_on_turn_end()) { self.stop().await; self.lines = None; self.exit = None; self.asked.clear(); self.live_proc = None; self.ag.stats.procs_exited.fetch_add(1, Relaxed); } // Grok.stop: SIGTERM after the turn's events
+        if ended && self.driver.as_ref().map_or(false, |d| d.closes_stdin_on_turn_end()) {
+            if let Some(p) = &mut self.live_proc {
+                // Drop the last live sender. The writer drains queued replies, then closes stdin.
+                // Keep the process and exit receiver until it has flushed the persisted session.
+                let (closed, rx) = mpsc::channel(1); drop(rx); p.input = closed;
+            }
+        } else if ended && self.driver.as_ref().map_or(false, |d| d.ends_on_turn_end()) { self.stop().await; self.lines = None; self.exit = None; self.asked.clear(); self.live_proc = None; self.ag.stats.procs_exited.fetch_add(1, Relaxed); } // Grok.stop: SIGTERM after the turn's events
         if ended { if self.live_proc.is_none() { self.codex_next().await } else { self.next_ride = true } }
     }
 

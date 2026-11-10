@@ -156,8 +156,12 @@ async fn ask(cmd: &Path, args: &[&str], lines: &[&str], done: fn(&str) -> bool, 
 }
 
 fn codex_cache_path() -> PathBuf {
-    std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")).join("models_cache.json")
+    codex_cache_at(std::env::var_os("CODEX_HOME"), std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+fn codex_cache_at(codex_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>, profile: Option<std::ffi::OsString>) -> PathBuf {
+    codex_home.filter(|v| !v.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home.filter(|v| !v.is_empty()).or_else(|| profile.filter(|v| !v.is_empty())).unwrap_or_default()).join(".codex"))
+        .join("models_cache.json")
 }
 
 /// Models.detect: every agent at once; one that is not installed (or blocked: a stand-in folder without it) is None.
@@ -234,6 +238,14 @@ mod tests {
         assert_eq!(codex_models(t), ["gpt-6.1-sol"]); let a = codex_about("codex 1.2", t);
         assert_eq!(a["labels"]["gpt-6.1-sol"], "GPT-6.1-Sol · Latest workhorse"); assert_eq!(a["labels"]["default"], "Codex's configured default"); assert_eq!(a["efforts"]["gpt-6.1-sol"], json!(["low", "high"]));
         assert!(codex_models("not json").is_empty());
+    }
+    #[test] fn codex_catalog_uses_windows_profile_when_home_is_missing() {
+        let profile = PathBuf::from("C:/Users/person");
+        let expected = profile.join(".codex").join("models_cache.json");
+        assert_eq!(codex_cache_at(None, None, Some(profile.clone().into_os_string())), expected);
+        assert_eq!(codex_cache_at(Some("".into()), Some("".into()), Some(profile.into_os_string())), expected);
+        assert_eq!(codex_cache_at(Some("custom-codex".into()), Some("home".into()), Some("profile".into())), PathBuf::from("custom-codex").join("models_cache.json"));
+        assert_eq!(codex_cache_at(None, Some("home".into()), Some("profile".into())), PathBuf::from("home").join(".codex").join("models_cache.json"));
     }
     #[test] fn grok_reads_its_bullets() {
         let o = "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  - grok-4.7\n  * grok-4.6 (default)\n  - grok-4.5\n";

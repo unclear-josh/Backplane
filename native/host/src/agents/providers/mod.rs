@@ -51,7 +51,7 @@ pub trait Driver: Send {
     fn argv(&self, a: &TurnIn) -> Vec<String>;
     /// Environment on top of the actor's (OPENCODE_CONFIG_CONTENT, GEMINI_HOME, ...).
     fn env(&self, _a: &TurnIn) -> Vec<(String, String)> { vec![] }
-    /// Lines to write to the process's stdin once it runs (initialize, session/new, prompt, ...). Empty for Codex: the text is an argument.
+    /// Lines to write to the process's stdin once it runs (initialize, session/new, prompt, ...). Empty for Codex exec on Unix.
     fn start(&mut self, _a: &TurnIn) -> Vec<String> { vec![] }
     /// One stdout line. A line that is not JSON is passed as `Value::String`.
     fn on_line(&mut self, line: &Value) -> Reaction;
@@ -67,6 +67,9 @@ pub trait Driver: Send {
     fn exit_why(&self, _code: i32) -> Option<String> { None }
     /// Per-turn processes the actor must end once the turn's own events are in (Grok: SIGTERM after turn.completed/turn.failed). Codex exits by itself.
     fn ends_on_turn_end(&self) -> bool { false }
+    /// Close stdin after the terminal event, then wait for normal process exit before resuming.
+    /// Codex app-server uses EOF to flush its session and shut down cleanly.
+    fn closes_stdin_on_turn_end(&self) -> bool { false }
     /// A permission/question in `request` (see above): None if it is not one.
     fn ask_info(&self, _request: &Value) -> Option<AskInfo> { None }
     /// Lines to write to stdin for the person's answer to `request`.
