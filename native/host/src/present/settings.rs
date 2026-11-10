@@ -176,6 +176,12 @@ fn licenses_dir() -> Option<std::path::PathBuf> {
 }
 
 const PROVIDERS: &[&str] = &["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp"];
+/// Shared desktop and phone choices. Empty inherits Codex's configured tier.
+pub fn codex_speed_choices(speed: &str) -> Vec<Value> {
+    use crate::agents::providers::codex::{SPEEDS, service_tier};
+    let current = if service_tier(speed).is_some() { speed } else { "" };
+    SPEEDS.iter().map(|(value, label)| json!({"label":if *value == "fast" { "Fast / priority (higher usage)" } else { label },"value":value,"on":*value == current,"ok":true,"why":""})).collect()
+}
 /// Settings > Agents, as far as the hub knows it: the default provider and model for new threads and thinking. Provider install and sign-in, the fallback hierarchy and Antigravity's account are not on this page yet.
 fn agents(st: &State, info: &Value) -> Vec<Value> {
     let models: Value = info["models"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
@@ -190,6 +196,8 @@ fn agents(st: &State, info: &Value) -> Vec<Value> {
         row("Provider and model for new threads", "Each thread keeps its own; change it from the composer.", vec![]),
         row("Provider", &if cli.is_empty() && prov != "claude" { format!("{prov} is not installed") } else { cli.to_string() }, chips(PROVIDERS, prov, "agent.provider")),
         row("Model", &format!("{}: {}", if model.is_empty() { "default" } else { model }, label), chips(&ids, model, "agent.model")),
+        row("Codex speed", "Applies to future Codex turns in all chats on this hub. Fast availability and usage depend on your model and account.",
+            codex_speed_choices(set(st, crate::agents::providers::codex::SPEED_KEY, "")).iter().map(|c| btn(s(c, "label"), "setting", &format!("{}={}", crate::agents::providers::codex::SPEED_KEY, s(c, "value")), c["on"] == true)).collect()),
         row("Show thinking", "Ask agents for their thinking and show it in the thread, folded (Claude, Codex and Pi; a Claude session restarts to take it)", chips(&["on", "off"], set(st, "agent.thinking", "off"), "agent.thinking")),
     ]
 }
@@ -738,6 +746,22 @@ pub fn act(hub: &str, session: &Value, action: &str, value: &str) -> Option<Out>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn codex_speed_control_keeps_its_selection_and_sends_the_setting() {
+        let mut st = State::new(); st.lean = true;
+        for speed in ["fast", "standard", ""] {
+            st.apply(&json!({"$":"SettingSet","key":"codex.speed","value":speed,"at":1}));
+            let rows = agents(&st, &json!({}));
+            let row = rows.iter().find(|r| r["label"] == "Codex speed").unwrap();
+            let buttons = row["buttons"].as_array().unwrap();
+            assert_eq!(buttons.len(), 3);
+            let selected: Vec<_> = buttons.iter().filter(|b| b["on"] == true).collect();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0]["value"], format!("codex.speed={speed}"));
+        }
+        let out = act("hub", &json!({"rid":1}), "setting", "codex.speed=fast").unwrap();
+        let sent: Value = serde_json::from_str(out.cmds[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(sent["m"], "setting.set"); assert_eq!(sent["p"], json!({"key":"codex.speed","value":"fast"}));
+    }
     fn st(kv: &[(&str, &str)]) -> State { let mut s = State::new(); for (k, v) in kv { s.settings.insert(k.to_string(), v.to_string()); } s }
     fn labels(v: &Value) -> Vec<String> { v["rows"].as_array().unwrap().iter().map(|r| r["label"].as_str().unwrap().to_string()).collect() }
 

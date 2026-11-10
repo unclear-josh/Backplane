@@ -31,7 +31,7 @@ pub struct Ask { pub thread: String, pub kind: String, pub tool: String, pub det
 pub struct World { /** a thread's queued hand-overs (`handoff:*`), (msg, text): the conversation a switch or a fork owes the agent, which goes with its next turn */ #[serde(default)] pub handoffs: HashMap<String, Vec<(String, String)>>, pub home: String, pub bots: HashMap<String, (String, String, bool)>, pub rooms: HashMap<String, (String, bool)>, pub bot_of: HashMap<String, String>, pub said_to: HashMap<String, std::collections::HashSet<String>>, pub reviews: HashMap<String, Vec<(String, String, u64)>>, pub queued: HashMap<String, Vec<String>>, pub parents: HashMap<String, String>, pub td_msgs: std::collections::HashSet<String>, pub launched: HashMap<String, (String, bool)>, pub projects: HashMap<String, (String, bool)>, pub tasks: HashMap<String, Tk>, pub deadlines: std::collections::HashSet<String>, pub asks: HashMap<String, Ask>, pub sessions: std::collections::HashSet<(String, String)>, pub threads: HashMap<String, T>, pub roots: HashMap<String, String>, pub st: HashMap<String, String>, seen: usize }
 
 const KEYS: &[&str] = &["text.provider", "text.model", "lock.warning.", "locks.lease.minutes", "carry.wait.", "summary.", "rule.", "watch.", "thread.parent.", "bg.", "wait.", "work.timeout.seconds", "allowance.claude", "effort.", "buy.", "kicad.ipc", "order.enabled", "agent.lang", "tz.machine", "agent.thinking", "restart.continue", "tok.epoch", "tok.recount", "tok.basis.", "turn.speed.", "turn.models.", "limit.claude.", "ride.", "agy.", "session.", "launch.n.", "uber.bot"];
-fn tracked(k: &str) -> bool { KEYS.iter().any(|p| k == *p || (p.ends_with('.') && k.starts_with(p))) || k.starts_with("usage.") || k.starts_with("tok.key.") }
+fn tracked(k: &str) -> bool { KEYS.iter().any(|p| k == *p || (p.ends_with('.') && k.starts_with(p))) || super::providers::SETTINGS.contains(&k) || k.starts_with("usage.") || k.starts_with("tok.key.") }
 
 pub const CARRY_TEXT: &str = "Backplane restarted while you were working. Continue where you left off.";
 
@@ -187,6 +187,13 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn codex_speed_is_kept_in_the_agent_world_and_can_be_cleared() {
+        let mut w = World::default();
+        for speed in ["fast", "standard", ""] {
+            w.apply(&serde_json::json!({"$":"SettingSet","key":super::super::providers::codex::SPEED_KEY,"value":speed,"at":1}).to_string());
+            assert_eq!(w.setting(super::super::providers::codex::SPEED_KEY), speed);
+        }
+    }
     fn th(turn: &str) -> T { T { turn: turn.into(), provider: "claude".into(), ..Default::default() } }
     // the GPUI "send is dropped" report: a hand-written log (json.dumps puts a space after the colon) must fold like a compact one, as Model does
     #[test] fn a_spaced_log_line_folds_like_a_compact_one() {

@@ -105,6 +105,7 @@ if me == "claude":
 # codex
 if a[:1] == ["--version"]: print("codex-cli 0.0.0"); sys.exit(0)
 if "app-server" in a:
+    resume, tid = "", ""
     for l in sys.stdin:
         try: m = json.loads(l)
         except Exception: continue
@@ -112,6 +113,21 @@ if "app-server" in a:
         i, meth = m["id"], m.get("method")
         if meth == "account/read": say({"id": i, "result": {"account": {"type": "chatgpt", "email": who, "planType": "plus"}, "workspaceRouting": {"chatgptAccountId": who}}})
         elif meth == "model/list": say({"id": i, "result": {"data": [{"model": "gpt-x", "displayName": "GPT X", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]}]}})
+        elif meth == "config/read": say({"id": i, "result": {"config": {}}})
+        elif meth in ("thread/start", "thread/resume"):
+            resume = m.get("params", {}).get("threadId", "")
+            tid = resume or "cs-" + who + "-" + uuid.uuid4().hex[:8]
+            say({"id": i, "result": {"thread": {"id": tid}}})
+        elif meth == "turn/start":
+            text = "\n".join(x.get("text", "") for x in m["params"]["input"] if x["type"] == "text")
+            record(resume, text)
+            say({"id": i, "result": {"turn": {"id": "turn-1"}}})
+            how = mode()
+            error = "You've hit your usage limit. Try again later." if how.startswith("limit") else "Your access token could not be refreshed. Please run /login" if how == "auth" else ""
+            if not error:
+                say({"method": "item/completed", "params": {"threadId": tid, "item": {"id": "it1", "type": "agentMessage", "text": "answered by " + who}}})
+                say({"method": "thread/tokenUsage/updated", "params": {"threadId": tid, "tokenUsage": {"total": {"inputTokens": 1, "cachedInputTokens": 0, "outputTokens": 1}}}})
+            say({"method": "turn/completed", "params": {"threadId": tid, "turn": {"status": "failed" if error else "completed", "error": {"message": error, "resets_at": int(how.split(":")[1]) if how.startswith("limit:") else 0}}}})
         else: say({"id": i, "result": {}})
     sys.exit(0)
 text = a[-1] if a else ""

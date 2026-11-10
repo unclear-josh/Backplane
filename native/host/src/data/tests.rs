@@ -388,6 +388,23 @@ impl crate::api::RpcHandler for PushState {
     let r = ask(&mut ws, 21, "thread.pick", json!({"thread":"nope","action":"model","value":"x"})).await; assert_eq!(r["ok"], false);
     let r = ask(&mut ws, 22, "thread.create", json!({"project":"p1","provider":"claude","model":"opus","effort":"high","runtime":"auto"})).await; assert_eq!(r["ok"], true);
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)] async fn codex_speed_phone_picker_persists_and_clears_the_same_setting_as_desktop() {
+    let (hub, port) = up_with("codex-speed", "{\"$\":\"ProviderSet\",\"id\":\"t2\",\"provider\":\"codex\",\"model\":\"\",\"at\":1700000040}\n").await;
+    hub.register_rpc(Arc::new(crate::settings::set::SettingSet { agents: None }));
+    let mut ws = open(port, "&enc=json").await; next(&mut ws).await;
+    for speed in ["fast", "standard", ""] {
+        let r = ask(&mut ws, 1, "thread.pick", json!({"thread":"t2","action":"codex-speed","value":speed})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(hub.setting("codex.speed").await.unwrap_or_default(), speed);
+        let r = ask(&mut ws, 2, "thread.picker", json!({"thread":"t2"})).await;
+        let section = r["result"]["picker"]["sections"].as_array().unwrap().iter().find(|s| s["action"] == "codex-speed").unwrap();
+        assert_eq!(section["choices"].as_array().unwrap().iter().find(|c| c["on"] == true).unwrap()["value"], speed);
+    }
+    for (thread, value) in [("t1", "fast"), ("t2", "invalid")] {
+        assert_eq!(ask(&mut ws, 3, "thread.pick", json!({"thread":thread,"action":"codex-speed","value":value})).await["ok"], false);
+    }
+    assert_eq!(hub.setting("codex.speed").await, None);
+}
 #[test] fn the_picker_keeps_a_model_the_list_lacks_and_marks_what_is_in_force() {
     let models = json!({"claude":[{"value":"opus","label":"Opus","ok":true,"why":""}],"codex":[{"value":"gpt","label":"GPT","ok":false,"why":"its CLI is not installed on this machine"}]});
     let p = super::ext::picker_sections(&models, "claude", "old-model", "high", "auto");

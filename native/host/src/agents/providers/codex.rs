@@ -1,32 +1,25 @@
-//! Codex: exec on Unix; the app-server pipe protocol on Windows, where large argv fails with OS error 206.
-use super::{Driver, Made, Reaction, TurnIn};
-use serde_json::Value;
-use crate::agents::codex as c;
-#[cfg(any(windows, test))]
+//! Codex's app-server pipe protocol: bounded argv and explicit speed on new and resumed chats.
+use super::Made;
 #[path = "codex_appserver.rs"]
 mod appserver;
 
-pub struct CodexDriver;
-impl Driver for CodexDriver {
-    fn argv(&self, a: &TurnIn) -> Vec<String> {
-        c::args(&c::ArgsIn { model: &a.model, session: &a.session, runtime: &a.runtime, effort: &a.effort, think: a.think, images: &a.images, mcp_url: &a.mcp_url, pcbparts: &a.pcbparts_url, prompt: &a.prompt, text: &a.text })
-    }
-    fn on_line(&mut self, line: &Value) -> Reaction { if line.is_object() { Reaction { send: vec![], shapes: vec![line.clone()] } } else { Reaction::default() } }
-}
+pub const SPEED_KEY: &str = "codex.speed";
+pub const SPEEDS: &[(&str, &str)] = &[("", "Codex default"), ("standard", "Standard"), ("fast", "Fast / priority")];
+pub fn service_tier(speed: &str) -> Option<&'static str> { match speed { "standard" => Some("default"), "fast" => Some("fast"), _ => None } }
+
 pub fn driver(provider: &str) -> Option<Made> {
     if provider != "codex" { return None }
-    #[cfg(windows)]
-    let driver: Box<dyn Driver> = Box::new(appserver::AppServer::default());
-    #[cfg(not(windows))]
-    let driver: Box<dyn Driver> = Box::new(CodexDriver);
-    Some(Made { cli: "codex", driver })
+    Some(Made { cli: "codex", driver: Box::new(appserver::AppServer::default()) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn codex_passes_its_own_shapes_through_and_ignores_noise() {
-        let mut d = CodexDriver; assert_eq!(d.on_line(&serde_json::json!({"type":"item.delta","text":"x"})).shapes.len(), 1); assert!(d.on_line(&Value::String("warning".into())).shapes.is_empty());
-        assert!(super::super::driver("codex").is_some());
+    #[test] fn codex_speed_uses_the_pipe_driver_on_every_platform() {
+        let d = driver("codex").unwrap();
+        let a = super::super::TurnIn { prompt: "p".repeat(100000), text: "t".repeat(100000), ..Default::default() };
+        assert_eq!(d.driver.argv(&a)[0], "app-server");
+        assert!(d.driver.argv(&a).join(" ").len() < 1024);
+        assert!(driver("other").is_none());
     }
 }

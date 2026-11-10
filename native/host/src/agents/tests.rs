@@ -403,12 +403,11 @@ fn waiting(ev: &[Value]) -> Vec<String> { let mut m = std::collections::BTreeMap
     assert_eq!(waiting(&ev), Vec::<String>::new()); ag.shutdown();
 }
 #[tokio::test(flavor = "multi_thread")] async fn a_restart_carries_a_codex_thread_on_in_its_own_session() {
-    let sd = dir("cx-bin"); let args = sd.join("args");
-    script(&sd, "codex", &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}}}'\n", crate::plat::fs::script_path(&args)));
+    let sd = dir("cx-bin"); script(&sd, "codex", CODEX_STANDIN);
     let (hub, ag, _h, _w) = start("cx", |w| { let l = cut_log(w, 1).replace("\"provider\":\"claude\"", "\"provider\":\"codex\""); l + &format!("{{\"$\":\"SessionSet\",\"id\":\"{T1}\",\"session\":\"S-cut\",\"at\":1700000120}}\n") }, |_| Cli::standin(&sd)).await;
     let ev = until(&hub, 0, 10, |ev| ev.iter().any(|e| turn_is(e, "completed"))).await;
     assert_eq!(carried(&ev).len(), 1, "{ev:?}");
-    let a = std::fs::read_to_string(&args).unwrap(); assert!(a.starts_with("exec\nresume\nS-cut\n") && a.contains(world::CARRY_TEXT), "{a}"); ag.shutdown();
+    let requests = codex_requests(&sd); assert!(requests.iter().any(|r| r["method"] == "thread/resume" && r["params"]["threadId"] == "S-cut")); assert!(requests.iter().any(|r| r["method"] == "turn/start" && r["params"]["input"][0]["text"].as_str().unwrap().contains(world::CARRY_TEXT))); ag.shutdown();
 }
 #[tokio::test(flavor = "multi_thread")] async fn a_restart_carries_on_at_most_a_burst_at_once() {
     let sd = dir("cb-bin"); script(&sd, "claude", DEAF);
@@ -720,9 +719,10 @@ async fn recovered(extra: &str, state: &str) -> Vec<Value> {
 #[tokio::test(flavor = "multi_thread")] async fn recover_leaves_idle() { let ev = recovered("", "idle").await; assert!(!ev.iter().any(|e| turn_is(e, "interrupted")) && !ev.iter().any(|e| e["kind"] == "restart")) }
 #[tokio::test(flavor = "multi_thread")] async fn recover_empty_nothing() { let sd = dir("re-bin"); perf_standin(&sd, 1); let (hub, ag, _h, _w) = start("re", |w| base_log(w, 1, ""), |_| Cli::standin(&sd)).await; let n = len(&hub).await; tokio::time::sleep(Duration::from_millis(300)).await; assert_eq!(len(&hub).await, n); ag.shutdown() }
 
-// ---- Codex: one process per turn, Codex-shaped lines (codex.rs) ----
-/// A `codex` stand-in: reads the turn's text from its last argument; "slow" turns wait; every turn says thread.started, a delta, a command and a reply that echoes the text.
+// ---- Codex: one app-server process per turn, normalized Codex shapes ----
+/// A `codex` stand-in: reads the turn's text from JSON stdin; "slow" turns wait; every turn says thread.started, a delta, a command and a reply that echoes the text.
 const CODEX_STANDIN: &str = include_str!("../../../../test/agents/standin-codex.sh");
+fn codex_requests(sd: &Path) -> Vec<Value> { std::fs::read_to_string(sd.join("requests.log")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect() }
 fn codex_log(work: &Path) -> String { base_log(work, 1, "").replace("\"provider\":\"claude\"", "\"provider\":\"codex\"") }
 async fn codex_start(name: &str) -> (Arc<Hub>, Arc<Agents>, PathBuf) {
     let sd = dir(&format!("{name}-bin")); script(&sd, "codex", CODEX_STANDIN);
@@ -743,8 +743,8 @@ async fn codex_start(name: &str) -> (Arc<Hub>, Arc<Agents>, PathBuf) {
 #[tokio::test(flavor = "multi_thread")] async fn a_second_codex_turn_resumes_the_session() {
     let (hub, ag, sd) = codex_start("cx2").await;
     for t in ["one", "two"] { let from = len(&hub).await; rpc(&hub, "turn.start", json!({"thread":T1,"text":t})).await; until(&hub, from, 20, |ev| ev.iter().any(|e| turn_is(e, "completed"))).await; tokio::time::sleep(Duration::from_millis(300)).await }
-    let argv = std::fs::read_to_string(sd.join("argv.log")).unwrap_or_default(); let ls: Vec<&str> = argv.lines().filter(|l| l.starts_with("exec ")).collect();
-    assert!(ls[0].starts_with("exec --json --skip-git-repo-check"), "{argv}"); assert!(ls[1].starts_with("exec resume cs-1 --json"), "{argv}");
+    let requests = codex_requests(&sd); let methods: Vec<&str> = requests.iter().filter_map(|r| r["method"].as_str()).filter(|m| m.starts_with("thread/")).collect();
+    assert_eq!(methods, ["thread/start", "thread/resume"]); assert!(requests.iter().any(|r| r["method"] == "thread/resume" && r["params"]["threadId"] == "cs-1"));
     let ev = log_from(&hub, 0).await; let us: Vec<&Value> = ev.iter().filter(|e| is(e, "TurnUsage")).collect();
     assert_eq!(us.len(), 1, "the same totals are one turn's usage"); ag.shutdown();
 }
@@ -1566,7 +1566,7 @@ async fn a_dollar_skill_of_the_persons_own_reaches_the_agent_as_a_slash_command_
         let _ = std::fs::remove_dir_all(uh.join(drop)); std::fs::create_dir_all(uh.join(keep)).unwrap(); std::fs::write(uh.join(keep).join("SKILL.md"), "---\nname: zqwhale\ndescription: d\n---\nSECRET=PURPLE-OTTER-77\n").unwrap();
         let sd = dir(&format!("sc-bin-{provider}"));
         if provider == "claude" { script(&sd, "claude", &format!("#!/bin/sh\nwhile IFS= read -r X; do case \"$X\" in *'\"type\":\"user\"'*) {find}; printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"cwd\":\"/tmp\",\"tools\":[],\"model\":\"fake\",\"permissionMode\":\"default\"}}'; printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"id\":\"m1\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"The skill says '\"$w\"'\"}}],\"usage\":{{\"input_tokens\":1}}}},\"session_id\":\"s1\"}}'; printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"session_id\":\"s1\"}}';; esac; done\n")) }
-        else { script(&sd, "codex", &format!("#!/bin/sh\ncase \"$1\" in --version) echo codex-cli 0.0.0; exit 0;; esac\nfor a in \"$@\"; do X=\"$a\"; done\n{find}\necho '{{\"type\":\"thread.started\",\"thread_id\":\"cs-1\"}}'\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i\",\"type\":\"agent_message\",\"text\":\"The skill says %s\"}}}}\\n' \"$w\"\necho '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}}}'\n")) }
+        else { script(&sd, "codex", &CODEX_STANDIN.replacen("\n", "\nexport FAKE_READ_SKILL=1\n", 1)); }
         let home = dir(&format!("sc-home-{provider}")); let work = dir(&format!("sc-work-{provider}"));
         let log = if provider == "codex" { codex_log(&work) } else { base_log(&work, 1, "") }; std::fs::write(home.join("events.jsonl"), log).unwrap();
         let hub = Hub::start(Cfg { home: home.clone(), version: "0.1.0-dev".into(), commit: "c".into(), listen: "x".into(), os: "linux".into(), arch: "x64".into() }, Arc::new(Canned { reply: json!({}) })).await.unwrap();
@@ -1732,7 +1732,7 @@ async fn lines_at_least(sd: &Path, n: usize) -> Vec<Value> { for _ in 0..100 { l
     ag.wake_ride(T1, "rep-2", "a launched thread reported").await.unwrap();
     let ev = log_from(&hub, from2).await;
     assert!(ev.iter().any(|e| is(e, "ActivityLogged") && e["kind"] == "steer"), "a report steers too: {ev:?}");
-    let mut argv = String::new(); for _ in 0..50 { argv = std::fs::read_to_string(sd.join("argv.log")).unwrap_or_default(); if argv.contains("a launched thread reported") { break } tokio::time::sleep(Duration::from_millis(100)).await }
+    let mut argv = String::new(); for _ in 0..50 { argv = std::fs::read_to_string(sd.join("requests.log")).unwrap_or_default(); if argv.contains("a launched thread reported") { break } tokio::time::sleep(Duration::from_millis(100)).await }
     assert!(argv.contains("a launched thread reported"), "the turn started again with it");
     assert_eq!(ag.stats.procs_spawned.load(Relaxed), 4); ag.shutdown();
 }

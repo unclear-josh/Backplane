@@ -1,6 +1,6 @@
-//! Windows Codex transport. Keep instructions, input, images and session ids off argv.
+//! Codex transport. Keep instructions, input, images and session ids off argv.
 //! One app-server per turn; the actor closes stdin after committing the terminal event.
-use super::{Driver, Reaction, TurnIn};
+use super::super::{Driver, Reaction, TurnIn};
 use serde_json::{json, Value};
 
 #[derive(Default)]
@@ -10,6 +10,7 @@ pub struct AppServer {
     pending: u64,
     usage: Value,
     done: bool,
+    configured_tier: String,
 }
 
 fn request(id: u64, method: &str, params: Value) -> String { json!({"id":id,"method":method,"params":params}).to_string() }
@@ -34,6 +35,9 @@ impl AppServer {
         let mut input = vec![json!({"type":"text","text":a.text})];
         input.extend(a.images.iter().map(|p| json!({"type":"localImage","path":p})));
         let mut p = json!({"threadId":self.thread,"input":input});
+        // Explicitly reset a resumed session's previous tier. Codex default comes from config/read.
+        let tier = super::service_tier(a.setting(super::SPEED_KEY)).unwrap_or(if self.configured_tier.is_empty() { "default" } else { &self.configured_tier });
+        p["serviceTier"] = json!(tier);
         if ["low", "medium", "high", "xhigh"].contains(&a.effort.as_str()) { p["effort"] = json!(a.effort); }
         if a.think { p["summary"] = json!("detailed"); }
         request(3, "turn/start", p)
@@ -59,7 +63,12 @@ impl Driver for AppServer {
             if let Some(error) = line.get("error") { return self.fail(&format!("Codex app-server: {}", text(error, "message"))) }
             let Some(result) = line.get("result") else { return Reaction::default() };
             match self.pending {
-                1 => { self.pending = 2; return Reaction { send: vec![json!({"method":"initialized"}).to_string(), self.thread_request()], shapes: vec![] } }
+                1 => {
+                    let next = if super::service_tier(self.turn.setting(super::SPEED_KEY)).is_some() { self.pending = 2; self.thread_request() }
+                        else { self.pending = 4; request(4, "config/read", json!({"includeLayers":false})) };
+                    return Reaction { send: vec![json!({"method":"initialized"}).to_string(), next], shapes: vec![] }
+                }
+                4 => { self.configured_tier = text(&result["config"], "service_tier").into(); self.pending = 2; return Reaction { send: vec![self.thread_request()], shapes: vec![] } }
                 2 => {
                     let id = text(&result["thread"], "id");
                     if id.is_empty() { return self.fail("Codex app-server returned no thread id") }
@@ -117,8 +126,9 @@ impl Driver for AppServer {
                 self.done = true;
                 if text(&p["turn"], "status") == "completed" { r.shapes.push(json!({"type":"turn.completed","usage":self.usage})); }
                 else {
-                    let message = text(&p["turn"]["error"], "message");
-                    r.shapes.push(json!({"type":"turn.failed","error":{"message":if message.is_empty() { "Codex turn did not complete" } else { message }}}));
+                    let mut error = p["turn"]["error"].as_object().cloned().unwrap_or_default();
+                    if error.get("message").and_then(Value::as_str).unwrap_or("").is_empty() { error.insert("message".into(), json!("Codex turn did not complete")); }
+                    r.shapes.push(json!({"type":"turn.failed","error":error}));
                 }
             }
             "error" => r.shapes.push(json!({"type":"error","message":p["error"]["message"]})),
@@ -134,7 +144,9 @@ mod tests {
     fn turn() -> TurnIn { TurnIn { cwd: "C:/project".into(), runtime: "auto".into(), prompt: "developer\n\"instructions\"".into(), text: "user 🦀\r\nmessage".into(), mcp_url: "http://127.0.0.1:1234/mcp".into(), pcbparts_url: "https://pcbparts.dev/mcp".into(), ..Default::default() } }
     fn ready(a: &TurnIn) -> AppServer {
         let mut d = AppServer::default(); d.start(a);
-        d.on_line(&json!({"id":1,"result":{}})); d.on_line(&json!({"id":2,"result":{"thread":{"id":"S"}}}));
+        d.on_line(&json!({"id":1,"result":{}}));
+        if d.pending == 4 { d.on_line(&json!({"id":4,"result":{"config":{"service_tier":null}}})); }
+        d.on_line(&json!({"id":2,"result":{"thread":{"id":"S"}}}));
         d.on_line(&json!({"id":3,"result":{}})); d
     }
     #[test] fn huge_fresh_and_resumed_turns_stay_off_the_command_line() {
@@ -144,7 +156,9 @@ mod tests {
             assert!(d.argv(&a).join(" ").encode_utf16().count() < 1024);
             let st = d.start(&a); assert_eq!(serde_json::from_str::<Value>(&st[0]).unwrap()["method"], "initialize");
             let init = d.on_line(&json!({"id":1,"result":{}}));
-            let req: Value = serde_json::from_str(&init.send[1]).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&init.send[1]).unwrap()["method"], "config/read");
+            let config = d.on_line(&json!({"id":4,"result":{"config":{}}}));
+            let req: Value = serde_json::from_str(&config.send[0]).unwrap();
             assert_eq!(req["method"], if session.is_empty() { "thread/start" } else { "thread/resume" });
             assert_eq!(req["params"]["developerInstructions"], a.prompt);
             assert_eq!(req["params"]["model"], a.model);
@@ -165,6 +179,16 @@ mod tests {
             assert_eq!(req["params"]["sandbox"], sandbox); assert_eq!(req["params"]["approvalPolicy"], "never");
         }
     }
+    #[test] fn codex_speed_resets_resumed_tiers_and_keeps_the_selected_model() {
+        for session in ["", "S"] { for speed in ["", "standard", "fast", "unknown"] {
+            let a = TurnIn { session: session.into(), model: "chosen-model".into(), settings: vec![(super::super::SPEED_KEY.into(), speed.into())], ..turn() };
+            let mut d = ready(&a); d.configured_tier = "flex".into();
+            let request: Value = serde_json::from_str(&d.turn_request()).unwrap();
+            assert_eq!(request["params"]["serviceTier"], super::super::service_tier(speed).unwrap_or("flex"));
+            let thread: Value = serde_json::from_str(&d.thread_request()).unwrap();
+            assert_eq!(thread["params"]["model"], "chosen-model");
+        } }
+    }
     #[test] fn transcript_preserves_messages_tools_plans_usage_and_completes_once() {
         let mut d = ready(&turn());
         let event = |method: &str, mut params: Value| { params["threadId"] = json!("S"); json!({"method":method,"params":params}) };
@@ -181,7 +205,7 @@ mod tests {
         assert!(d.closes_stdin_on_turn_end()); assert!(!d.ends_on_turn_end()); assert!(d.on_line(&end).shapes.is_empty());
     }
     #[test] fn errors_and_foreign_events_do_not_hang_or_complete_another_thread() {
-        for pending in [1, 2, 3] {
+        for pending in [1, 2, 3, 4] {
             let mut d = AppServer { pending, ..Default::default() };
             assert_eq!(d.on_line(&json!({"id":pending,"error":{"message":"failed"}})).shapes[0]["type"], "turn.failed");
         }
@@ -204,6 +228,7 @@ mod tests {
             let response = match text(&v, "method") {
                 "initialize" => json!({"id":1,"result":{}}),
                 "initialized" => continue,
+                "config/read" => json!({"id":4,"result":{"config":{"service_tier":null}}}),
                 "thread/start" | "thread/resume" => {
                     assert_eq!(v["params"]["developerInstructions"], "developer 🦀\n\"\\".repeat(10000));
                     json!({"id":2,"result":{"thread":{"id":"S"}}})

@@ -28,7 +28,7 @@ pub struct TurnIn {
     pub settings: Vec<(String, String)>,
 }
 /// The settings the actor copies into `TurnIn.settings` (add a key here when a driver needs one).
-pub const SETTINGS: &[&str] = &["agy.auth", "agy.account", "agy.gcp.project", "agy.gcp.location"];
+pub const SETTINGS: &[&str] = &["agy.auth", "agy.account", "agy.gcp.project", "agy.gcp.location", codex::SPEED_KEY];
 impl TurnIn { pub fn setting(&self, k: &str) -> &str { self.settings.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str()).unwrap_or("") } }
 
 /// What a driver answers to one line from its process: lines to write back (a reply, the next request) and Codex-shaped lines for the log.
@@ -51,7 +51,7 @@ pub trait Driver: Send {
     fn argv(&self, a: &TurnIn) -> Vec<String>;
     /// Environment on top of the actor's (OPENCODE_CONFIG_CONTENT, GEMINI_HOME, ...).
     fn env(&self, _a: &TurnIn) -> Vec<(String, String)> { vec![] }
-    /// Lines to write to the process's stdin once it runs (initialize, session/new, prompt, ...). Empty for Codex exec on Unix.
+    /// Lines to write to the process's stdin once it runs (initialize, session/new, prompt, ...).
     fn start(&mut self, _a: &TurnIn) -> Vec<String> { vec![] }
     /// One stdout line. A line that is not JSON is passed as `Value::String`.
     fn on_line(&mut self, line: &Value) -> Reaction;
